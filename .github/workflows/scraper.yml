@@ -1,9 +1,9 @@
 name: Automated Job Hunter
 
 on:
-  schedule:
+  #schedule:
     # Runs every 30 minutes to stay safely under the free 2,000 min/month limit
-    - cron: '*/30 * * * *'
+    # - cron: '*/30 * * * *'
   workflow_dispatch: # Allows manual triggers
 
 jobs:
