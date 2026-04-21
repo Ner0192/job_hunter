@@ -28,7 +28,8 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GIT_PAT: ${{ secrets.GIT_PAT }}
-          GIST_ID: ${{ secrets.GIST_ID }}
+          TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID }}
+          GIST_ID: ${{ vars.GIST_ID }}
+          MATCH_SCORE: ${{ vars.MATCH_SCORE }}
         run: python main.py
