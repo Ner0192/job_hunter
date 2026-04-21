@@ -1,9 +1,9 @@
 name: Automated Job Hunter
 
 on:
-  schedule:
+  # schedule:
     # Runs at 7 minutes every hour
-    - cron: "7 * * * *"
+    # - cron: "7 * * * *"
   workflow_dispatch:
     # Allows manual triggers
 
