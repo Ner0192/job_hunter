@@ -4,7 +4,8 @@ on:
   schedule:
     # Runs every 30 minutes to stay safely under the free 2,000 min/month limit
     - cron: "0 * * * *"
-  workflow_dispatch: # Allows manual triggers
+  workflow_dispatch:
+    # Allows manual triggers
 
 jobs:
   run-pipeline:
@@ -16,7 +17,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11' 
+          python-version: "3.14.3"
 
       - name: Install Dependencies
         run: |
