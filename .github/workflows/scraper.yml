@@ -1,9 +1,9 @@
 name: Automated Job Hunter
 
 on:
-  #schedule:
+  schedule:
     # Runs every 30 minutes to stay safely under the free 2,000 min/month limit
-    # - cron: '*/30 * * * *'
+    - cron: "0 * * * *"
   workflow_dispatch: # Allows manual triggers
 
 jobs:
@@ -28,4 +28,6 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GIT_PAT: ${{ secrets.GIT_PAT }}
+          GIST_ID: ${{ secrets.GIST_ID }}
         run: python main.py
