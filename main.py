@@ -6,7 +6,8 @@ import requests
 from google import genai
 from pydantic import BaseModel, Field
 from google.genai import errors
-# from dotenv import load_dotenv # For local use uncomment this 
+
+# from dotenv import load_dotenv # For local use uncomment this
 
 # --- 0. CONFIGURE LOGGING ---
 logging.basicConfig(
@@ -24,7 +25,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GIT_PAT = os.getenv("GIT_PAT")
 GIST_ID = os.getenv("GIST_ID")
-MATCH_SCORE = int(os.getenv("MATCH_SCORE", 0))
+MATCH_SCORE = int(os.getenv("MATCH_SCORE", 75))
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
