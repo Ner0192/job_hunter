@@ -26,6 +26,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GIT_PAT = os.getenv("GIT_PAT")
 GIST_ID = os.getenv("GIST_ID")
 MATCH_SCORE = int(os.getenv("MATCH_SCORE", 75))
+MODEL = os.getenv("MODEL", "gemini-2.5-flash")
+BACKUP_MODEL = os.getenv("BACKUP_MODEL", "gemini-2.5-flash-lite")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -137,16 +139,54 @@ def evaluate_jobs_batch(jobs_batch: list[dict]) -> BatchJobEvaluation | None:
     {jobs_text}
     """
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config={
-            "response_mime_type": "application/json",
-            "response_schema": BatchJobEvaluation,
-            "temperature": 0.1,
-        },
-    )
-    return response.parsed  # type: ignore
+    # Extract the config so we can reuse it for both models
+    generation_config = {
+        "response_mime_type": "application/json",
+        "response_schema": BatchJobEvaluation,
+        "temperature": 0.1,
+    }
+
+    try:
+        # 1. Try the primary workhorse model
+        response = client.models.generate_content(
+            model=MODEL,  # type: ignore
+            contents=prompt,
+            config=generation_config,  # type: ignore
+        )
+        return response.parsed  # type: ignore
+
+    except errors.APIError as e:
+        # 2. Catch the specific 503 (Unavailable) or 500 (Internal) traffic jam errors
+        if e.code in [503, 500]:
+            print(f"WARNING - Main model busy ({e.code}). Falling back to Flash-8B...")
+
+            try:
+                # Instantly reroute to the lighter 8B model, using the EXACT same config
+                fallback_response = client.models.generate_content(
+                    model=BACKUP_MODEL,
+                    contents=prompt,
+                    config=generation_config,  # type: ignore
+                )
+                print("INFO - Successfully evaluated using Flash-8B fallback.")
+                return fallback_response.parsed  # type: ignore
+
+            except Exception as fallback_error:
+                # 3. If even the fallback fails, trigger the safety sleep
+                print(
+                    f"ERROR - Fallback also failed: {fallback_error}. Sleeping for 30s..."
+                )
+                time.sleep(30)
+                return None
+        else:
+            # If it's a different error (like a 400 Bad Request), print it so you can debug
+            print(f"ERROR - Google API Error: {e.message}")
+            return None
+
+    except Exception as e:
+        # Catch any standard network timeouts
+        print(f"ERROR - Network or Unexpected Error: {e}. Sleeping for 30s...")
+        time.sleep(30)
+        return None
 
 
 def fetch_jobs(seen_jobs: set):
