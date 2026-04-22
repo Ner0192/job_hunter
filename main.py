@@ -8,7 +8,7 @@ from google import genai
 from pydantic import BaseModel, Field
 from google.genai import errors
 
-from dotenv import load_dotenv  # For local use uncomment this
+# from dotenv import load_dotenv  # For local use uncomment this
 
 
 # --- 0. CONFIGURE LOGGING ---
@@ -52,7 +52,7 @@ console_handler = logging.StreamHandler()
 console_handler.setFormatter(ColoredFormatter())
 logger.addHandler(console_handler)
 
-load_dotenv()  # For local use uncomment this
+# load_dotenv()  # For local use uncomment this
 
 # --- 1. SETUP & CONFIG ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
