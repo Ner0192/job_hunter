@@ -1,4 +1,5 @@
 import os
+import sys  # Added to handle system exits
 import time
 import logging
 from bs4 import BeautifulSoup
@@ -7,17 +8,51 @@ from google import genai
 from pydantic import BaseModel, Field
 from google.genai import errors
 
-# from dotenv import load_dotenv # For local use uncomment this
+from dotenv import load_dotenv  # For local use uncomment this
+
 
 # --- 0. CONFIGURE LOGGING ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger(__name__)
+class ColoredFormatter(logging.Formatter):
+    # Define the ANSI color codes (Matching your Bash script!)
+    CYAN = "\033[0;36m"
+    ORANGE = "\033[38;5;214m"
+    RED = "\033[0;31m"
+    RESET = "\033[0m"
 
-# load_dotenv() # For local use uncomment this
+    # Map each log level to its specific color format
+    # We use modern {} formatting. The ^8 tells Python to center the word in 8 spaces.
+    FORMATS = {
+        logging.INFO: f"{{asctime}} - [{CYAN}{{levelname:^8}}{RESET}] - {{message}}",
+        logging.WARNING: f"{{asctime}} - [{ORANGE}{{levelname:^8}}{RESET}] - {{message}}",
+        logging.ERROR: f"{{asctime}} - [{RED}{{levelname:^8}}{RESET}] - {{message}}",
+        logging.CRITICAL: f"{{asctime}} - [{RED}{{levelname:^8}}{RESET}] - {{message}}",
+    }
+
+    def format(self, record):
+        # Fetch the color format for the specific log level
+        log_fmt = self.FORMATS.get(
+            record.levelno, "{asctime} - {levelname:^8} - {message}"
+        )
+
+        # CRITICAL: Because we are using {} now, we must add style="{" here!
+        formatter = logging.Formatter(log_fmt, datefmt="%Y-%m-%d %H:%M:%S", style="{")
+        return formatter.format(record)
+
+
+# Initialize the logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Prevent duplicate logs if the script is imported or run multiple times
+if logger.hasHandlers():
+    logger.handlers.clear()
+
+# Attach the custom colored formatter to the console output
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(ColoredFormatter())
+logger.addHandler(console_handler)
+
+load_dotenv()  # For local use uncomment this
 
 # --- 1. SETUP & CONFIG ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -156,37 +191,34 @@ def evaluate_jobs_batch(jobs_batch: list[dict]) -> BatchJobEvaluation | None:
         return response.parsed  # type: ignore
 
     except errors.APIError as e:
-        # 2. Catch the specific 503 (Unavailable) or 500 (Internal) traffic jam errors
+        # 2. Catch traffic jam errors
         if e.code in [503, 500]:
-            print(f"WARNING - Main model busy ({e.code}). Falling back to Flash-8B...")
+            logger.warning(
+                f"Main model busy ({e.code}). Falling back to {BACKUP_MODEL}..."
+            )
 
             try:
-                # Instantly reroute to the lighter 8B model, using the EXACT same config
+                # Instantly reroute to the fallback model
                 fallback_response = client.models.generate_content(
                     model=BACKUP_MODEL,
                     contents=prompt,
                     config=generation_config,  # type: ignore
                 )
-                print("INFO - Successfully evaluated using Flash-8B fallback.")
+                logger.info(f"Successfully evaluated using {BACKUP_MODEL} fallback.")
                 return fallback_response.parsed  # type: ignore
 
             except Exception as fallback_error:
-                # 3. If even the fallback fails, trigger the safety sleep
-                print(
-                    f"ERROR - Fallback also failed: {fallback_error}. Sleeping for 30s..."
+                # 3. CRITICAL: If both models fail, raise an error to crash the pipeline
+                raise RuntimeError(
+                    f"Both primary and backup models failed! Fallback error: {fallback_error}"
                 )
-                time.sleep(30)
-                return None
         else:
-            # If it's a different error (like a 400 Bad Request), print it so you can debug
-            print(f"ERROR - Google API Error: {e.message}")
-            return None
+            # For other API errors (like bad keys), crash the pipeline
+            raise RuntimeError(f"Unrecoverable Google API Error: {e.message}")
 
     except Exception as e:
-        # Catch any standard network timeouts
-        print(f"ERROR - Network or Unexpected Error: {e}. Sleeping for 30s...")
-        time.sleep(30)
-        return None
+        # Catch standard network timeouts and crash
+        raise RuntimeError(f"Unexpected Network Error: {e}")
 
 
 def fetch_jobs(seen_jobs: set):
@@ -275,6 +307,7 @@ if __name__ == "__main__":
 
     seen_jobs = load_seen_jobs()
     newly_evaluated_jobs = set()  # Keep track of what we evaluate this run
+    pipeline_failed = False  # Flag to track if the script should crash at the end
 
     jobs = fetch_jobs(seen_jobs)
 
@@ -325,20 +358,28 @@ if __name__ == "__main__":
                     newly_evaluated_jobs.add(evaluation.job_id)
                     seen_jobs.add(evaluation.job_id)
 
-            except errors.APIError as e:
-                if e.code in [503, 429]:
-                    logger.warning(f"Temporary Gemini Error ({e.code}). Waiting 30s...")
-                    time.sleep(30)
-                else:
-                    logger.error(f"Gemini API Error: {e}")
+                time.sleep(5)
+
+            except RuntimeError as e:
+                logger.error(f"PIPELINE CRASH INITIATED: {e}")
+                pipeline_failed = True
+                break  # Stop processing any more batches
+
             except Exception as e:
-                logger.error(f"General Error: {e}")
+                logger.error(f"Unexpected Error: {e}")
+                pipeline_failed = True
+                break  # Stop processing any more batches
 
-            time.sleep(5)
-
-    # CRITICAL: Only write to the cloud database once at the very end
+    # CRITICAL: Save jobs that WERE successfully evaluated before the crash happened
     if newly_evaluated_jobs:
         logger.info(f"Saving {len(newly_evaluated_jobs)} new jobs to GitHub Gist...")
         save_seen_jobs(seen_jobs)
+
+    # Finally, trigger the hard failure for GitHub
+    if pipeline_failed:
+        logger.error(
+            "Exiting with status code 1. GitHub Action will now mark as FAILED."
+        )
+        sys.exit(1)
 
     logger.info("Pipeline run complete.")
