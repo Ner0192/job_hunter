@@ -1,5 +1,5 @@
 import os
-import sys  # Added to handle system exits
+import sys
 import time
 import logging
 from bs4 import BeautifulSoup
@@ -13,14 +13,11 @@ from google.genai import errors
 
 # --- 0. CONFIGURE LOGGING ---
 class ColoredFormatter(logging.Formatter):
-    # Define the ANSI color codes (Matching your Bash script!)
     CYAN = "\033[0;36m"
     ORANGE = "\033[38;5;214m"
     RED = "\033[0;31m"
     RESET = "\033[0m"
 
-    # Map each log level to its specific color format
-    # We use modern {} formatting. The ^8 tells Python to center the word in 8 spaces.
     FORMATS = {
         logging.INFO: f"{{asctime}} - [{CYAN}{{levelname:^8}}{RESET}] - {{message}}",
         logging.WARNING: f"{{asctime}} - [{ORANGE}{{levelname:^8}}{RESET}] - {{message}}",
@@ -29,25 +26,19 @@ class ColoredFormatter(logging.Formatter):
     }
 
     def format(self, record):
-        # Fetch the color format for the specific log level
         log_fmt = self.FORMATS.get(
             record.levelno, "{asctime} - {levelname:^8} - {message}"
         )
-
-        # CRITICAL: Because we are using {} now, we must add style="{" here!
         formatter = logging.Formatter(log_fmt, datefmt="%Y-%m-%d %H:%M:%S", style="{")
         return formatter.format(record)
 
 
-# Initialize the logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# Prevent duplicate logs if the script is imported or run multiple times
 if logger.hasHandlers():
     logger.handlers.clear()
 
-# Attach the custom colored formatter to the console output
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(ColoredFormatter())
 logger.addHandler(console_handler)
@@ -66,12 +57,40 @@ BACKUP_MODEL = os.getenv("BACKUP_MODEL", "gemini-2.5-flash-lite")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Minimal fallback CV used only when cv.txt is missing from the Gist
+MY_CV_FALLBACK = """
+Backend Software Engineer with 3.5+ years of experience.
+Expertise in building secure, scalable, and high-performance systems, including GenAI pipelines and LLM integrations.
+Key Skills: Python (Expert), FastAPI, Django, Flask, SQL, Go, Bash, REST APIs, Async Services, Microservices, Event-Driven Architecture, Jinja2, Langchain, Docker, CI/CD, GitHub Actions, Jenkins, Git, PostgreSQL, MySQL, MongoDB, Redis, Firebase, AWS (EC2, Lambda).
+AI Experience: Built and integrated GenAI-powered assistants and conversational systems using LLM APIs and NLU models.
+"""
 
-# --- 2. STATE MANAGEMENT (CLOUD GIST DEDUPLICATION) ---
-def load_seen_jobs() -> set:
+
+# --- 2. STATE MANAGEMENT (CLOUD GIST) ---
+WORK_TYPE_MAP = {
+    "remote": "2",
+    "office": "1",
+    "both": "1,2",
+}
+
+
+def load_gist_state() -> tuple[set, str, set, str]:
+    """Load seen_jobs, CV text, company blacklist, and work type from Gist in a single API call.
+
+    Expects the Gist to contain:
+      - seen_jobs.txt   — deduplication store (one job ID per line)
+      - cv.txt          — your CV text sent to the AI for matching
+      - blacklist.txt   — companies to skip (one company name per line, case-insensitive)
+      - work_type.txt   — one of: remote | office | both  (default: remote)
+    """
+    seen_jobs: set = set()
+    cv_text: str = MY_CV_FALLBACK
+    blacklist: set = set()
+    work_type: str = "2"  # default: remote only
+
     if not GIT_PAT or not GIST_ID:
-        logger.warning("GIT_PAT or GIST_ID missing. Deduplication disabled.")
-        return set()
+        logger.warning("GIT_PAT or GIST_ID missing. Deduplication and CV loading disabled.")
+        return seen_jobs, cv_text, blacklist, work_type
 
     headers = {
         "Authorization": f"Bearer {GIT_PAT}",
@@ -82,15 +101,39 @@ def load_seen_jobs() -> set:
             f"https://api.github.com/gists/{GIST_ID}", headers=headers
         )
         response.raise_for_status()
-        gist_data = response.json()
+        files = response.json().get("files", {})
 
-        if "seen_jobs.txt" in gist_data.get("files", {}):
-            content = gist_data["files"]["seen_jobs.txt"].get("content", "")
-            return set(content.splitlines())
-        return set()
+        if "seen_jobs.txt" in files:
+            content = files["seen_jobs.txt"].get("content", "")
+            seen_jobs = set(content.splitlines())
+
+        if "cv.txt" in files:
+            content = files["cv.txt"].get("content", "").strip()
+            if content:
+                cv_text = content
+                logger.info("CV loaded from Gist (cv.txt).")
+            else:
+                logger.warning("cv.txt is empty in Gist. Using fallback CV.")
+        else:
+            logger.warning("cv.txt not found in Gist. Using fallback CV.")
+
+        if "blacklist.txt" in files:
+            content = files["blacklist.txt"].get("content", "")
+            blacklist = {c.strip().lower() for c in content.splitlines() if c.strip()}
+            logger.info(f"Loaded {len(blacklist)} blacklisted companies from Gist.")
+
+        if "work_type.txt" in files:
+            raw = files["work_type.txt"].get("content", "").strip().lower()
+            if raw in WORK_TYPE_MAP:
+                work_type = WORK_TYPE_MAP[raw]
+                logger.info(f"Work type set to: {raw} (f_WT={work_type})")
+            else:
+                logger.warning(f"Unknown work_type '{raw}'. Valid: remote, office, both. Defaulting to remote.")
+
     except Exception as e:
         logger.error(f"Error loading from Gist: {e}")
-        return set()
+
+    return seen_jobs, cv_text, blacklist, work_type
 
 
 def save_seen_jobs(all_seen_jobs: set):
@@ -132,16 +175,7 @@ class BatchJobEvaluation(BaseModel):
     evaluations: list[JobMatchEvaluation]
 
 
-# --- 4. THE CV ---
-MY_CV = """
-Backend Software Engineer with 3.5+ years of experience. 
-Expertise in building secure, scalable, and high-performance systems, including GenAI pipelines and LLM integrations.
-Key Skills: Python (Expert),FastAPI, Django, Flask, SQL, Go, Bash, REST APIs, Async Services, Microservices, Event-Driven Architecture, Jinja2, Langchain, Docker, CI/CD, GitHub Actions, Jenkins, Git, PostgreSQL, MySQL, MongoDB, Redis, Firebase, AWS (EC2, Lambda).
-AI Experience: Built and integrated GenAI-powered assistants and conversational systems using LLM APIs and NLU models.
-"""
-
-
-# --- 5. CORE FUNCTIONS ---
+# --- 4. CORE FUNCTIONS ---
 def send_telegram_message(text: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -156,7 +190,7 @@ def send_telegram_message(text: str):
         logger.error(f"Failed to send Telegram message: {e}")
 
 
-def evaluate_jobs_batch(jobs_batch: list[dict]) -> BatchJobEvaluation | None:
+def evaluate_jobs_batch(jobs_batch: list[dict], cv_text: str) -> BatchJobEvaluation | None:
     if not jobs_batch:
         return None
 
@@ -166,15 +200,14 @@ def evaluate_jobs_batch(jobs_batch: list[dict]) -> BatchJobEvaluation | None:
 
     prompt = f"""
     You are an expert technical recruiter. Evaluate the following batch of Job Descriptions against the provided CV.
-    
+
     My CV:
-    {MY_CV}
-    
+    {cv_text}
+
     Jobs to Evaluate:
     {jobs_text}
     """
 
-    # Extract the config so we can reuse it for both models
     generation_config = {
         "response_mime_type": "application/json",
         "response_schema": BatchJobEvaluation,
@@ -182,7 +215,6 @@ def evaluate_jobs_batch(jobs_batch: list[dict]) -> BatchJobEvaluation | None:
     }
 
     try:
-        # 1. Try the primary workhorse model
         response = client.models.generate_content(
             model=MODEL,  # type: ignore
             contents=prompt,
@@ -191,14 +223,11 @@ def evaluate_jobs_batch(jobs_batch: list[dict]) -> BatchJobEvaluation | None:
         return response.parsed  # type: ignore
 
     except errors.APIError as e:
-        # 2. Catch traffic jam errors
         if e.code in [503, 500]:
             logger.warning(
                 f"Main model busy ({e.code}). Falling back to {BACKUP_MODEL}..."
             )
-
             try:
-                # Instantly reroute to the fallback model
                 fallback_response = client.models.generate_content(
                     model=BACKUP_MODEL,
                     contents=prompt,
@@ -206,23 +235,20 @@ def evaluate_jobs_batch(jobs_batch: list[dict]) -> BatchJobEvaluation | None:
                 )
                 logger.info(f"Successfully evaluated using {BACKUP_MODEL} fallback.")
                 return fallback_response.parsed  # type: ignore
-
             except Exception as fallback_error:
-                # 3. CRITICAL: If both models fail, raise an error to crash the pipeline
                 raise RuntimeError(
                     f"Both primary and backup models failed! Fallback error: {fallback_error}"
                 )
         else:
-            # For other API errors (like bad keys), crash the pipeline
             raise RuntimeError(f"Unrecoverable Google API Error: {e.message}")
 
     except Exception as e:
-        # Catch standard network timeouts and crash
         raise RuntimeError(f"Unexpected Network Error: {e}")
 
 
-def fetch_jobs(seen_jobs: set):
-    logger.info("Scraping LinkedIn (Sorted by Newest)...")
+def fetch_jobs(seen_jobs: set, blacklist: set, work_type: str = "2") -> list[dict]:
+    work_label = {v: k for k, v in WORK_TYPE_MAP.items()}.get(work_type, work_type)
+    logger.info(f"Scraping LinkedIn (Work type: {work_label}, Sorted by Newest)...")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept-Language": "en-US,en;q=0.9",
@@ -237,7 +263,7 @@ def fetch_jobs(seen_jobs: set):
             f"&geoId=105214831"
             f"&f_TPR=r1200"  # Last 20 mins
             f"&f_E=2,3,4"
-            f"&f_WT=2,3"
+            f"&f_WT={work_type}"
             f"&sortBy=DD"
             f"&start={start_index}"
         )
@@ -265,7 +291,6 @@ def fetch_jobs(seen_jobs: set):
                     continue
                 job_id = job_urn.split(":")[-1]  # type: ignore
 
-                # Short-circuit logic: Stop scraping if we hit a known job
                 if job_id in seen_jobs:
                     logger.info(
                         f"Encountered already processed job ({job_id}). Catch-up complete."
@@ -274,6 +299,11 @@ def fetch_jobs(seen_jobs: set):
 
                 title = card.find("h3", class_="base-search-card__title").text.strip()  # type: ignore
                 company = card.find("h4", class_="base-search-card__subtitle").text.strip()  # type: ignore
+
+                if company.lower() in blacklist:
+                    logger.info(f"Skipping blacklisted company: {company}")
+                    continue
+
                 logger.info(f"Fetching: {title} at {company}")
 
                 desc_url = (
@@ -301,20 +331,19 @@ def fetch_jobs(seen_jobs: set):
     return jobs_data
 
 
-# --- 6. THE MAIN PIPELINE ---
+# --- 5. THE MAIN PIPELINE ---
 if __name__ == "__main__":
     logger.info("Starting Cloud-Optimized Job Hunt Pipeline...")
 
-    seen_jobs = load_seen_jobs()
-    newly_evaluated_jobs = set()  # Keep track of what we evaluate this run
-    pipeline_failed = False  # Flag to track if the script should crash at the end
+    seen_jobs, cv_text, blacklist, work_type = load_gist_state()
+    newly_evaluated_jobs = set()
+    pipeline_failed = False
 
-    jobs = fetch_jobs(seen_jobs)
+    jobs = fetch_jobs(seen_jobs, blacklist, work_type)
 
     if not jobs:
         logger.info("No new jobs found since last run.")
     else:
-        # Group jobs into chunks of 6
         BATCH_SIZE = 6
         job_batches = [
             jobs[i : i + BATCH_SIZE] for i in range(0, len(jobs), BATCH_SIZE)
@@ -323,7 +352,7 @@ if __name__ == "__main__":
         for batch in job_batches:
             logger.info(f"Evaluating batch of {len(batch)} jobs...")
             try:
-                batch_result: BatchJobEvaluation = evaluate_jobs_batch(batch)  # type: ignore
+                batch_result: BatchJobEvaluation = evaluate_jobs_batch(batch, cv_text)  # type: ignore
                 if not batch_result:
                     continue
 
@@ -354,7 +383,6 @@ if __name__ == "__main__":
                             f"Skipped. ({title}) - Score: {evaluation.match_score}%"
                         )
 
-                    # Track this ID so we save it to the cloud later
                     newly_evaluated_jobs.add(evaluation.job_id)
                     seen_jobs.add(evaluation.job_id)
 
@@ -363,19 +391,17 @@ if __name__ == "__main__":
             except RuntimeError as e:
                 logger.error(f"PIPELINE CRASH INITIATED: {e}")
                 pipeline_failed = True
-                break  # Stop processing any more batches
+                break
 
             except Exception as e:
                 logger.error(f"Unexpected Error: {e}")
                 pipeline_failed = True
-                break  # Stop processing any more batches
+                break
 
-    # CRITICAL: Save jobs that WERE successfully evaluated before the crash happened
     if newly_evaluated_jobs:
         logger.info(f"Saving {len(newly_evaluated_jobs)} new jobs to GitHub Gist...")
         save_seen_jobs(seen_jobs)
 
-    # Finally, trigger the hard failure for GitHub
     if pipeline_failed:
         logger.error(
             "Exiting with status code 1. GitHub Action will now mark as FAILED."
